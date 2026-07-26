@@ -17,7 +17,20 @@ export const PROJECT_NAME = path.basename(PROJECT_DIR);
 export const SPECS_DIR = process.env.SPECS_DIR ?? path.join(PROJECT_DIR, "specs");
 
 const DB_PATH = process.env.DB_PATH ?? path.join(PROJECT_DIR, ".mcp-search");
-export const DEFAULT_MIN_SCORE = parseFloat(process.env.MIN_SCORE ?? "0.7");
+
+/**
+ * Cosine-similarity floor below which a hit is treated as noise.
+ *
+ * Calibrated against the default backend (Ollama + qwen3-embedding:0.6b) over
+ * two markdown corpora: on-topic queries put their best correct chunk at
+ * 0.44-0.81, while queries the corpus cannot answer top out at 0.46. 0.44 is
+ * the highest floor that still returns every on-topic query in those runs.
+ *
+ * The absolute scale is a property of the embedding model, not of the search:
+ * a different backend, model, or dimension count shifts the whole distribution,
+ * so MIN_SCORE should be re-measured after changing EMBEDDING_BACKEND.
+ */
+export const DEFAULT_MIN_SCORE = parseFloat(process.env.MIN_SCORE ?? "0.44");
 
 const SCHEMA_VERSION = 3;
 
@@ -305,8 +318,15 @@ export async function doSearch(params: SearchParams): Promise<SearchResult> {
   }));
 
   if (hits.length === 0) {
+    // Naming the closest rejected score distinguishes "nothing matched" from
+    // "the floor was slightly too high", which is otherwise invisible.
+    const best = rows.reduce((max, r) => Math.max(max, 1 - r._distance), 0);
+    const closest =
+      rows.length > 0
+        ? ` Closest match scored ${best.toFixed(3)}.`
+        : "";
     return {
-      text: "No results above threshold. Try a different query or lower min_score.",
+      text: `No results at or above min_score ${min_score}.${closest} Try a different query or a lower min_score.`,
       hits: [],
     };
   }

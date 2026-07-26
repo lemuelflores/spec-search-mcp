@@ -16,7 +16,7 @@ search options:
   --section <substr>                Filter to chunks under a matching heading (h1-h4)
   --chunk-type <type>                Filter by chunk type: content | code | table | toc
   --limit <n>                       Max results (default 5)
-  --min-score <f>                   Minimum similarity 0-1 (default 0.7)
+  --min-score <f>                   Minimum similarity 0-1 (default 0.44)
   --json                            Emit structured JSON instead of formatted text
 
   -h, --help                         Show this help

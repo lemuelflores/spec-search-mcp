@@ -114,7 +114,7 @@ Set environment variables in your shell or directly inside `.mcp.json` under the
 | `EMBEDDING_BACKEND` | `ollama`                | Vector provider: `ollama` or `gemini` |
 | `SPECS_DIR`         | `<project>/specs`       | Absolute path to markdown specs       |
 | `DB_PATH`           | `<project>/.mcp-search` | Where LanceDB index is stored         |
-| `MIN_SCORE`         | `0.7`                   | Default similarity threshold          |
+| `MIN_SCORE`         | `0.44`                  | Default similarity threshold          |
 
 ### Ollama Backend (Default)
 
@@ -166,7 +166,7 @@ mcp-semantic-search search <query> [options]
 | `--section <str>`     | Filter by matching section heading      | —       |
 | `--chunk-type <type>` | `content` \| `code` \| `table` \| `toc` | All     |
 | `--limit <n>`         | Max results to return                   | `5`     |
-| `--min-score <f>`     | Similarity floor (0.0–1.0)              | `0.7`   |
+| `--min-score <f>`     | Similarity floor (0.0–1.0)              | `0.44`  |
 | `--json`              | Output raw JSON instead of plain text   | `false` |
 
 ---

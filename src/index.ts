@@ -63,7 +63,7 @@ async function main() {
           min_score: {
             type: "number",
             description:
-              "Minimum similarity 0-1. Overrides the MIN_SCORE env var (default 0.7). Lower for rough search, higher for precise matches.",
+              "Minimum cosine similarity 0-1. Overrides the MIN_SCORE env var (default 0.44). Lower for rough search, higher for precise matches. Scores are model-relative: with the default embedding model, on-topic chunks land around 0.45-0.80 and unrelated ones below 0.45.",
           },
         },
         required: ["query"],
