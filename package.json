@@ -2,9 +2,14 @@
   "name": "mcp-semantic-search",
   "version": "1.0.0",
   "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "mcp-semantic-search": "./dist/cli.js"
+  },
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && chmod +x dist/cli.js dist/index.js",
     "start": "node dist/index.js",
+    "cli": "node dist/cli.js",
     "dev": "tsc && node dist/index.js"
   },
   "dependencies": {
