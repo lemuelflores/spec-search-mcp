@@ -3,6 +3,12 @@ import { Dirent } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { chunkMarkdown } from "./chunker.js";
+import {
+  EMBEDDING_BACKEND,
+  EMBEDDING_ID,
+  EMBEDDING_MODEL,
+  getBackend,
+} from "./embeddings.js";
 
 // --- Config (read at import time — CLI sets CLAUDE_PROJECT_DIR before importing) ---
 const PROJECT_DIR = process.env.CLAUDE_PROJECT_DIR ?? process.cwd();
@@ -10,12 +16,10 @@ const PROJECT_DIR = process.env.CLAUDE_PROJECT_DIR ?? process.cwd();
 export const PROJECT_NAME = path.basename(PROJECT_DIR);
 export const SPECS_DIR = process.env.SPECS_DIR ?? path.join(PROJECT_DIR, "specs");
 
-const OLLAMA_BASE_URL = process.env.OLLAMA_BASE_URL ?? "http://localhost:11434";
-const EMBEDDING_MODEL = process.env.EMBEDDING_MODEL ?? "qwen3-embedding:0.6b";
 const DB_PATH = process.env.DB_PATH ?? path.join(PROJECT_DIR, ".mcp-search");
 export const DEFAULT_MIN_SCORE = parseFloat(process.env.MIN_SCORE ?? "0.7");
 
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 
 // --- Types ---
 interface Document {
@@ -38,6 +42,10 @@ interface ProjectMeta {
   indexedAt: string;
   contentHash: string;
   schemaVersion?: number;
+  /** Vector space the stored embeddings belong to; see EMBEDDING_ID. */
+  embeddingId?: string;
+  /** Observed width of the stored vectors, recorded for diagnostics. */
+  dimensions?: number;
 }
 
 export interface SearchParams {
@@ -93,34 +101,6 @@ export async function saveMeta(meta: ProjectMeta): Promise<void> {
   );
 }
 
-export async function embed(text: string): Promise<number[]> {
-  const res = await fetch(`${OLLAMA_BASE_URL}/api/embed`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ model: EMBEDDING_MODEL, input: text }),
-  });
-  if (!res.ok) {
-    const body = await res.text();
-    throw new Error(`Ollama embed failed (${res.status}): ${body}`);
-  }
-  const data = (await res.json()) as { embeddings: number[][] };
-  return data.embeddings[0];
-}
-
-export async function embedBatch(texts: string[]): Promise<number[][]> {
-  const res = await fetch(`${OLLAMA_BASE_URL}/api/embed`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ model: EMBEDDING_MODEL, input: texts }),
-  });
-  if (!res.ok) {
-    const body = await res.text();
-    throw new Error(`Ollama batch embed failed (${res.status}): ${body}`);
-  }
-  const data = (await res.json()) as { embeddings: number[][] };
-  return data.embeddings;
-}
-
 export async function findMarkdownFiles(dir: string): Promise<string[]> {
   const files: string[] = [];
   async function walk(d: string): Promise<void> {
@@ -157,8 +137,14 @@ export async function doIndex(force = false): Promise<string> {
   const hash = await contentHash(SPECS_DIR);
   const existing = await loadMeta();
 
-  // Skip if unchanged and schema is current
-  if (!force && existing && existing.contentHash === hash && existing.schemaVersion === SCHEMA_VERSION) {
+  // Skip if unchanged, schema is current, and the vectors are still comparable
+  if (
+    !force &&
+    existing &&
+    existing.contentHash === hash &&
+    existing.schemaVersion === SCHEMA_VERSION &&
+    existing.embeddingId === EMBEDDING_ID
+  ) {
     return `Already indexed and up to date (${existing.fileCount} files, ${existing.chunkCount} chunks). Use reindex to force.`;
   }
 
@@ -196,7 +182,10 @@ export async function doIndex(force = false): Promise<string> {
       });
 
       if (pending.length >= BATCH) {
-        const vectors = await embedBatch(pending.map((p) => p.text));
+        const vectors = await getBackend().embed(
+          pending.map((p) => p.text),
+          "document",
+        );
         for (let j = 0; j < pending.length; j++) {
           allDocs.push({ ...pending[j].doc, vector: vectors[j] });
         }
@@ -206,7 +195,10 @@ export async function doIndex(force = false): Promise<string> {
   }
 
   if (pending.length > 0) {
-    const vectors = await embedBatch(pending.map((p) => p.text));
+    const vectors = await getBackend().embed(
+      pending.map((p) => p.text),
+      "document",
+    );
     for (let j = 0; j < pending.length; j++) {
       allDocs.push({ ...pending[j].doc, vector: vectors[j] });
     }
@@ -232,6 +224,8 @@ export async function doIndex(force = false): Promise<string> {
     indexedAt: new Date().toISOString(),
     contentHash: hash,
     schemaVersion: SCHEMA_VERSION,
+    embeddingId: EMBEDDING_ID,
+    dimensions: allDocs[0]?.vector.length,
   });
 
   const fileList = mdFiles
@@ -261,11 +255,18 @@ export async function doSearch(params: SearchParams): Promise<SearchResult> {
   if (!meta) {
     throw new Error("Not indexed yet. Run index first.");
   }
+  // Querying across vector spaces fails deep inside LanceDB on a dimension
+  // mismatch, so catch it here where the cause can still be named.
+  if (meta.embeddingId !== EMBEDDING_ID) {
+    throw new Error(
+      `Index was built with a different embedding backend (${meta.embeddingId ?? "unknown"}) than the one now configured (${EMBEDDING_ID}). Run index to rebuild.`,
+    );
+  }
 
   await fs.mkdir(DB_PATH, { recursive: true });
   const conn = await lancedb.connect(DB_PATH);
   const tbl = await conn.openTable("docs");
-  const vector = await embed(query);
+  const [vector] = await getBackend().embed([query], "query");
 
   let vq = (tbl.search(vector) as VectorQuery)
     .distanceType("cosine")
@@ -330,23 +331,36 @@ export async function doSearch(params: SearchParams): Promise<SearchResult> {
 // --- Status logic ---
 
 export async function doStatus(): Promise<string> {
+  const backendLine = `Backend: ${EMBEDDING_BACKEND} (${EMBEDDING_MODEL})`;
+
   const meta = await loadMeta();
   if (!meta) {
     return [
       `Project: ${PROJECT_NAME}`,
       `Specs:   ${SPECS_DIR}`,
+      backendLine,
       `Status:  not indexed`,
     ].join("\n");
   }
 
-  // Check if stale
+  // Check if stale, from either changed files or a changed vector space
   const currentHash = await contentHash(SPECS_DIR).catch(() => null);
-  const stale = currentHash !== null && currentHash !== meta.contentHash;
+  const filesChanged = currentHash !== null && currentHash !== meta.contentHash;
+  const backendChanged = meta.embeddingId !== EMBEDDING_ID;
+
+  let status = "up to date";
+  if (backendChanged) {
+    status = "STALE — embedding backend or model changed since last index";
+  } else if (filesChanged) {
+    status = "STALE — files changed since last index";
+  }
 
   return [
     `Project: ${PROJECT_NAME}`,
     `Specs:   ${SPECS_DIR}`,
-    `Status:  ${stale ? "STALE — files changed since last index" : "up to date"}`,
+    backendLine,
+    `Vectors: ${meta.dimensions ?? "unknown"} dimensions`,
+    `Status:  ${status}`,
     `Files:   ${meta.fileCount}`,
     `Chunks:  ${meta.chunkCount}`,
     `Indexed: ${meta.indexedAt}`,
